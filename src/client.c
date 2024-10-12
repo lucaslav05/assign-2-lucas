@@ -6,131 +6,131 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define CLIENT_PATH "/home/lucas-laviolette/tmp/client_fifo"
-#define SERVER_PATH "/home/lucas-laviolette/tmp/server_fifo"
-#define FILTER_SIZE 10
-#define MSG_SIZE 256
+#define CLIENT_FIFO "/tmp/client_fifo"
+#define SERVER_FIFO "/tmp/server_fifo"
+#define MAX_FILTER_LEN 10
+#define MAX_MSG_LEN 256
 
-void *writeToFIFO(void *arg);
+void *sendToFIFO(void *arg);
 
-// All arguments that need to be passed into the thread function
+// Scruct containing thread data
 typedef struct
 {
-    int  fd;
-    char filter[FILTER_SIZE];
-    char message[MSG_SIZE];
-} thread_args;
+    int  fileDesc;
+    char filterOption[MAX_FILTER_LEN];
+    char userMsg[MAX_MSG_LEN];
+} thread_data;
 
-// Start of program
+// Main function for client
 int main(int argc, char *argv[])
 {
-    int       clientfd;
-    int       serverfd;
-    char      incomingMsg[MSG_SIZE];
-    ssize_t   bytesRead;
-    pthread_t writerThread;
+    int       clientFile;
+    int       serverFile;
+    char      serverResponse[MAX_MSG_LEN];
+    ssize_t   bytesReceived;
+    pthread_t sendThread;
 
-    // Variables for input
-    int         opt;
-    const char *filter;
-    const char *message;
+    int         option;
+    const char *userFilter;
+    const char *msgContent;
 
-    thread_args thread_data;
-    filter  = NULL;
-    message = NULL;
-    while((opt = getopt(argc, argv, "f:m:")) != -1)
+    thread_data thread_args;
+    userFilter = NULL;
+    msgContent = NULL;
+
+    while((option = getopt(argc, argv, "f:m:")) != -1)
     {
-        switch(opt)
+        switch(option)
         {
             case 'f':
-                filter = optarg;
+                userFilter = optarg;
                 break;
             case 'm':
-                message = optarg;
+                msgContent = optarg;
                 break;
             default:
-                fprintf(stderr, "Usage: -a argument -m message\n");
+                fprintf(stderr, "Usage: -f filter -m message\n");
                 return EXIT_FAILURE;
         }
     }
 
-    if(filter == NULL || message == NULL)
+    if(userFilter == NULL || msgContent == NULL)
     {
-        fprintf(stderr, "Error: filter or message cannot be null\n");
+        fprintf(stderr, "Error: Filter and message must be provided\n");
         return EXIT_FAILURE;
     }
 
-    // Open the fd for writing to the FIFO. Blocks if server is not on
-    clientfd = open(CLIENT_PATH, O_WRONLY | O_CLOEXEC);
-    if(clientfd == -1)
+    // Open FIFO for writing
+    clientFile = open(CLIENT_FIFO, O_WRONLY | O_CLOEXEC);
+    if(clientFile == -1)
     {
-        perror("Error opening FIFO for writing");
+        perror("Error opening client FIFO for writing");
         return EXIT_FAILURE;
     }
 
-    // Create the data struct and fill
-    thread_data.fd = clientfd;
-    strncpy(thread_data.filter, filter, sizeof(thread_data.filter) - 1);
-    strncpy(thread_data.message, message, sizeof(thread_data.message) - 1);
+    // Populate the thread data
+    thread_args.fileDesc = clientFile;
+    strncpy(thread_args.filterOption, userFilter, sizeof(thread_args.filterOption) - 1);
+    strncpy(thread_args.userMsg, msgContent, sizeof(thread_args.userMsg) - 1);
 
-    // Create a new thread to write to the FIFO
-    if(pthread_create(&writerThread, NULL, writeToFIFO, (void *)&thread_data) != 0)
+    // Create thread to write to FIFO
+    if(pthread_create(&sendThread, NULL, sendToFIFO, (void *)&thread_args) != 0)
     {
-        perror("Error creating thread\n");
-        close(clientfd);
+        perror("Error creating writer thread");
+        close(clientFile);
         return EXIT_FAILURE;
     }
 
-    // Wait for the thread to finish
-    pthread_join(writerThread, NULL);
+    // Wait for the thread to complete
+    pthread_join(sendThread, NULL);
 
-    // Wait for server response
-    serverfd = open(SERVER_PATH, O_RDONLY | O_CLOEXEC);
-    if(serverfd == -1)
+    // Open FIFO to read server response
+    serverFile = open(SERVER_FIFO, O_RDONLY | O_CLOEXEC);
+    if(serverFile == -1)
     {
-        fprintf(stderr, "Error: couldn't read bytes\n");
-        close(clientfd);
+        fprintf(stderr, "Error: Unable to read from server FIFO\n");
+        close(clientFile);
         return EXIT_FAILURE;
     }
 
-    bytesRead = read(serverfd, incomingMsg, MSG_SIZE - 1);
-    if(bytesRead == -1)
+    bytesReceived = read(serverFile, serverResponse, MAX_MSG_LEN - 1);
+    if(bytesReceived == -1)
     {
-        fprintf(stderr, "Error: couldn't read bytes\n");
+        fprintf(stderr, "Error: Failed to read from server\n");
         goto cleanup;
     }
 
-    printf("%s\n", incomingMsg);
-    close(clientfd);
-    close(serverfd);
+    printf("%s\n", serverResponse);
+    close(clientFile);
+    close(serverFile);
     return EXIT_SUCCESS;
 
 cleanup:
-    close(clientfd);
-    close(serverfd);
+    close(clientFile);
+    close(serverFile);
     return EXIT_FAILURE;
 }
 
 // Thread function to write to FIFO
-void *writeToFIFO(void *arg)
+void *sendToFIFO(void *arg)
 {
-    const thread_args *data = (thread_args *)arg;
+    const thread_data *params = (thread_data *)arg;
 
-    int  clientfd = data->fd;
-    char msgBuffer[MSG_SIZE];
+    int  clientFile = params->fileDesc;
+    char buffer[MAX_MSG_LEN];
 
-    size_t required_size = (size_t)snprintf(NULL, 0, "%s\n%s", data->filter, data->message) + 1;
-    snprintf(msgBuffer, required_size, "%s\n%s", data->filter, data->message);
+    size_t totalSize = (size_t)snprintf(NULL, 0, "%s\n%s", params->filterOption, params->userMsg) + 1;
+    snprintf(buffer, totalSize, "%s\n%s", params->filterOption, params->userMsg);
 
-    // Write message to FIFO
-    if(write(clientfd, msgBuffer, strlen(msgBuffer)) == -1)
+    // Write to FIFO
+    if(write(clientFile, buffer, strlen(buffer)) == -1)
     {
-        fprintf(stderr, "Error: Could not write to the server\n");
-        close(clientfd);
+        fprintf(stderr, "Error: Failed to send data to server\n");
+        close(clientFile);
         pthread_exit(NULL);
     }
 
     // Close the file descriptor
-    close(clientfd);
+    close(clientFile);
     return NULL;
 }

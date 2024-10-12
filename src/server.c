@@ -8,152 +8,152 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define BUF_SIZE 256
-#define CLIENT_PATH "/home/lucas-laviolette/tmp/client_fifo"
-#define SERVER_PATH "/home/lucas-laviolette/tmp/server_fifo"
-#define PERMISSION 0666
+#define BUFFER_LEN 256
+#define CLIENT_FIFO "/tmp/client_fifo"
+#define SERVER_FIFO "/tmp/server_fifo"
+#define FILE_MODE 0666
 
-void *start_listening(void *arg);
-int   apply_filter(const char *filter, char *msg, size_t msg_size);
-void  cleanup(int sig);
+void *listenClient(void *arg);
+int   processFilter(const char *filter, char *msg, size_t len);
+void  handleExit(int sig);
 
+//Main function for server
 int main(void)
 {
-    int       fd;
+    int       fifoDescriptor;
     pthread_t listenerThread;
-    signal(SIGINT, cleanup);
+    signal(SIGINT, handleExit);
 
-    // Make FIFO's
-    mkfifo(CLIENT_PATH, PERMISSION);
-    mkfifo(SERVER_PATH, PERMISSION);
+    // Create FIFOs
+    mkfifo(CLIENT_FIFO, FILE_MODE);
+    mkfifo(SERVER_FIFO, FILE_MODE);
 
     while(1)
     {
-        // Open the file descriptor to read only
-        fd = open(CLIENT_PATH, O_RDONLY | O_CLOEXEC);
-        if((fd == -1) & (SIGINT == 2))
+        fifoDescriptor = open(CLIENT_FIFO, O_RDONLY | O_CLOEXEC);
+        if((fifoDescriptor == -1) & (SIGINT == 2))
         {
-            printf("\nClosing server and exiting program\n");
+            printf("\nServer shutting down..\n");
             return EXIT_SUCCESS;
         }
-        if(fd == -1)
+        if(fifoDescriptor == -1)
         {
-            fprintf(stderr, "Error: Could not open client FIFO on server end\n");
+            fprintf(stderr, "Error: Could not open client fifo\n");
             return EXIT_FAILURE;
         }
 
-        // Create a thread to start listening for incoming messages
-        if(pthread_create(&listenerThread, NULL, start_listening, (void *)&fd) != 0)
+        // Create thread to listen to the client
+        if(pthread_create(&listenerThread, NULL, listenClient, (void *)&fifoDescriptor) != 0)
         {
-            fprintf(stderr, "Error: could not creating thread\n");
-            goto cleanup;
+            fprintf(stderr, "Error: Could not create thread\n");
+            goto error_cleanup;
         }
 
         // Wait for the listener thread to finish
         pthread_join(listenerThread, NULL);
-        close(fd);
+        close(fifoDescriptor);
     }
 
-    // Cleanup upon error
-cleanup:
-    close(fd);
-    unlink(CLIENT_PATH);
-    unlink(SERVER_PATH);
+    // Error cleanup
+error_cleanup:
+    close(fifoDescriptor);
+    unlink(CLIENT_FIFO);
+    unlink(SERVER_FIFO);
     return EXIT_FAILURE;
 }
 
-void cleanup(int sig)
+void handleExit(int sig)
 {
     (void)sig;
-    unlink(CLIENT_PATH);
-    unlink(SERVER_PATH);
+    unlink(CLIENT_FIFO);
+    unlink(SERVER_FIFO);
 }
 
-int apply_filter(const char *filter, char *msg, size_t msg_size)
+int processFilter(const char *filter, char *msg, size_t len)
 {
     if(filter == NULL)
     {
-        fprintf(stderr, "Error: Filter is NULL\n");
+        fprintf(stderr, "Error: Empty filter\n");
         return -1;
     }
 
-    // upper
+    // Convert to uppercase
     if(strcmp(filter, "upper") == 0)
     {
-        for(size_t i = 0; i < msg_size && msg[i] != '\0'; i++)
+        for(size_t i = 0; i < len && msg[i] != '\0'; i++)
         {
             msg[i] = (char)toupper((unsigned char)msg[i]);
         }
         return 0;
     }
 
-    // lower
+    // Convert to lowercase
     if(strcmp(filter, "lower") == 0)
     {
-        for(size_t i = 0; i < msg_size && msg[i] != '\0'; i++)
+        for(size_t i = 0; i < len && msg[i] != '\0'; i++)
         {
             msg[i] = (char)tolower((unsigned char)msg[i]);
         }
         return 0;
     }
 
-    // none
+    // No filter
     if(strcmp(filter, "none") == 0)
     {
         return 0;
     }
 
-    // error case
+    // Invalid filter
     return -1;
 }
 
-void *start_listening(void *arg)
+void *listenClient(void *arg)
 {
-    int  serverfd;
-    int  clientfd = *((int *)arg);    // Cast and dereference the argument
-    char buff[BUF_SIZE];
+    int  clientFile;
+    int  serverFile = *((int *)arg);
+    char readBuffer[BUFFER_LEN];
 
-    const char *filter;
-    char       *message;
-    char       *state;
-    ssize_t     bytesRead = read(clientfd, buff, BUF_SIZE - 1);
+    const char *filterOption;
+    char       *msgContent;
+    char       *tokenState;
+    ssize_t     bytesRead = read(serverFile, readBuffer, BUFFER_LEN - 1);
     if(bytesRead == -1)
     {
-        fprintf(stderr, "Error: couldn't read from FIFO");
+        fprintf(stderr, "Error: Failed to read from fifo\n");
         pthread_exit(NULL);
     }
 
-    // Null terminate the end of the buffer
-    buff[bytesRead] = '\0';
+    // Null-terminate the buffer
+    readBuffer[bytesRead] = '\0';
 
-    // Open the server fd
-    serverfd = open(SERVER_PATH, O_WRONLY | O_CLOEXEC);
-    if(serverfd == -1)
+    // Open server FIFO
+    clientFile = open(SERVER_FIFO, O_WRONLY | O_CLOEXEC);
+    if(clientFile == -1)
     {
-        fprintf(stderr, "Error opening server file descriptor\n");
+        fprintf(stderr, "Error opening fifo\n");
         pthread_exit(NULL);
     }
 
-    // Split the argument and the message
-    filter  = strtok_r(buff, "\n", &state);
-    message = strtok_r(NULL, "\n", &state);
+    // Parse the filter and message
+    filterOption = strtok_r(readBuffer, "\n", &tokenState);
+    msgContent   = strtok_r(NULL, "\n", &tokenState);
 
-    // Compare the strings and apply the filter
-    if(apply_filter(filter, message, BUF_SIZE) == -1)
+    // Apply filter
+    if(processFilter(filterOption, msgContent, BUFFER_LEN) == -1)
     {
-        fprintf(stderr, "Error: Filter is invalid");
-        close(serverfd);
+        fprintf(stderr, "Error: Invalid filter\n");
+        close(clientFile);
         pthread_exit(NULL);
     }
 
-    // Write back to the other server
-    if(write(serverfd, message, BUF_SIZE - 1) == -1)
+    // Write the processed message back
+    if(write(clientFile, msgContent, BUFFER_LEN - 1) == -1)
     {
-        fprintf(stderr, "Error trying to write to server FIFO");
-        close(serverfd);
+        fprintf(stderr, "Error writing to server FIFO\n");
+        close(clientFile);
         pthread_exit(NULL);
     }
 
-    close(serverfd);
+    close(clientFile);
     return NULL;
 }
